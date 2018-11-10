@@ -22,7 +22,7 @@ class VGG(torch.nn.Module):
 
     def forward(self, x):
         out = self.features(x)
-        out = out.view(out.size(0), -1) # Reshape the tensor
+        out = out.view(out.size(0), -1)  # Reshape the tensor
         out = self.classifier(out)
         return out
 

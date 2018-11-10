@@ -1,9 +1,12 @@
 import torchvision
 import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
+import torch
+import torch.optim as optim
 import math
 import argparse
 import os
+import random as rm
 
 from src.resnet import *
 from src.alexnet import *
@@ -23,6 +26,8 @@ def parse_arguments():
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
+    parser.add_argument('--patience', type=int, default=0, metavar='P',
+                        help='Early-stopping restart')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
     parser.add_argument('--numworkers', type=int, default=1, metavar='S',
@@ -35,6 +40,8 @@ def parse_arguments():
                         help='how many batches to wait before logging training status')
     parser.add_argument('--outfolder', type=str,
                         help='Out folder for results')
+    parser.add_argument('--optimizer', type=str,
+                        help='Optimizer to use')
     parser.add_argument('--clr', dest='clr', action='store_true')
     parser.add_argument('--no-clr', dest='clr', action='store_false')
     parser.set_defaults(clr=False)
@@ -42,8 +49,10 @@ def parse_arguments():
     parser.add_argument('--no-alt-train', dest='alt', action='store_false')
     parser.set_defaults(alt=False)
     parser.add_argument('--cluster', action='store_true', default=False)
+    parser.add_argument('--gpu', action='store_true', default=False)
 
     return parser.parse_args()
+
 
 def set_seed(seed):
     # Reproducible runs
@@ -54,23 +63,108 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
+def choose_optimizer(opt, model, args):
+
+    if opt == 'momentum':
+        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, nesterov=False)
+    elif opt == 'nesterov':
+        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, nesterov=True)
+    elif opt == 'adagrad':
+        optimizer = optim.Adagrad(model.parameters())
+    elif opt == 'adam':
+        optimizer = optim.Adam(model.parameters())
+    elif opt == 'adamax':
+        optimizer = optim.Adamax(model.parameters())
+    elif opt == 'rmsprop':
+        optimizer = optim.RMSprop(model.parameters())
+
+    return optimizer
+
+
+def my_adaptive_nesterov(trainloader, model, optimizer, criterion):
+    v_t = []
+
+    for i, (inputs, labels) in enumerate(trainloader, 0):
+        inputs = inputs
+        labels = labels
+        if i == 0:
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+
+            for k, f in enumerate(model.parameters(), 0):
+                v_t.append(0.1 * f.grad.data.clone())
+        else:
+            for k, f in enumerate(model.parameters()):
+                f.data.sub_(0.1 * v_t[k])
+
+            optimizer.zero_grad()
+
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            loss.backward()
+
+            g = torch.tensor([0], dtype=torch.float32)
+
+            for k, f in enumerate(model.parameters(), 0):
+                g = torch.cat((g, f.grad.data.clone().view(-1)), dim=-1)
+
+            print(g.size())
+
+            epsilon = torch.clamp(loss.clone() / torch.clamp(torch.dot(g, g), max=1e10).data, min=0.001, max=0.1)
+
+            print(epsilon.data)
+            print(epsilon.data.size())
+
+            # d = torch.distributions.normal.Normal(torch.Tensor([0.0]), torch.Tensor([torch.std(g)]))
+
+            for k, f in enumerate(model.parameters(), 0):
+                # if i%5 == 0:
+                # f.data.sub_(f.grad.data.add_(d.sample().cuda()) * epsilon.data)
+                # else:
+                f.data.sub_(f.grad.data * epsilon.data)
+                v_t[k] = 0.5 * v_t[k] + f.grad.data * epsilon.data
+
+        del inputs, labels, outputs
+
+
+# Minibatch Persistency, with update_number = 1 corresponds to the standard method
+def train(trainloader, model, optimizer, criterion, update_number, gpu=True):
+    model.train()
+    for i, data in enumerate(trainloader, 0):
+        inputs, labels = data
+
+        if gpu:
+            inputs, labels = inputs.cuda(), labels.cuda()
+
+        for j in range(update_number):
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+        del inputs, labels, outputs
+
+
 def load_dataset(dataset_name="cifar10", minibatch=64, numworkers=2, cluster=False):
 
     if dataset_name == "cifar10":
         transform_train = transforms.Compose([
-            # transforms.RandomCrop(32, padding=4), 	#uncomment for data augmentation
-            # transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4), 	#uncomment for data augmentation
+            transforms.RandomHorizontalFlip(),      #uncomment for data augmentation
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
         ])
         transform_test = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))])
 
-        trainset = torchvision.datasets.CIFAR10(root='./data' if cluster==False else '../../data/', train=True,
+        trainset = torchvision.datasets.CIFAR10(root='/home/met/PycharmProjects/thesis/data' if not cluster else '/home/stringherm/thesis/data', train=True,
                                                 download=True, transform=transform_train)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=minibatch,
                                                   shuffle=True, num_workers=numworkers)
-        testset = torchvision.datasets.CIFAR10(root='./data' if cluster==False else '../../data/', train=False,
+        testset = torchvision.datasets.CIFAR10(root='/home/met/PycharmProjects/thesis/data' if not cluster else '/home/stringherm/thesis/data', train=False,
                                                download=True, transform=transform_test)
         testloader = torch.utils.data.DataLoader(testset, batch_size=minibatch,
                                                  shuffle=True, num_workers=numworkers)
@@ -78,12 +172,12 @@ def load_dataset(dataset_name="cifar10", minibatch=64, numworkers=2, cluster=Fal
     elif dataset_name == "cifar100":
         transform = transforms.Compose([transforms.ToTensor(),
                                         transforms.Normalize((0.5071, 0.4865, 0.4409), (0.267, 0.256, 0.276))])
-        trainset = torchvision.datasets.CIFAR100(root='./data', train=True,
-                                                 download=True, transform=transform)
+        trainset = torchvision.datasets.CIFAR100(root='/home/met/PycharmProjects/thesis/data' if not cluster else '/home/stringherm/thesis/data',
+                                                 train=True, download=True, transform=transform)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=minibatch,
                                                   shuffle=True, num_workers=numworkers)
-        testset = torchvision.datasets.CIFAR100(root='./data', train=False,
-                                                download=True, transform=transform)
+        testset = torchvision.datasets.CIFAR100(root='/home/met/PycharmProjects/thesis/data' if not cluster else '/home/stringherm/thesis/data',
+                                                train=False, download=True, transform=transform)
         testloader = torch.utils.data.DataLoader(testset, batch_size=minibatch,
                                                  shuffle=True, num_workers=numworkers)
         return trainloader, testloader
@@ -184,22 +278,6 @@ def cyclical_lr(step_sz, min_lr=0.001, max_lr=1, mode='triangular', scale_func=N
     return lr_lambda
 
 
-# Minibatch Persistency, with update_number = 1 corresponds to the standard method
-def train(trainloader, model, optimizer, criterion, update_number):
-    model.train()
-    for i, data in enumerate(trainloader, 0):
-        inputs, labels = data
-        inputs, labels = inputs.cuda(), labels.cuda()
-
-        for j in range(update_number):
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-        del inputs, labels, outputs
-
-
 def test(testloader, model):
     model.eval()
     correct = 0
@@ -232,6 +310,57 @@ def test_train(trainloader, model):
         del images, labels, outputs
 
     return test_loss / len(trainloader.dataset), correct / total
+
+
+def test_train_sample(trainloader, model, n_minibatches=1):
+    model.eval()
+    correct = 0
+    total = 0
+    test_loss = 0
+    length = 0
+
+    trainiter = iter(trainloader)
+    indexes = [0]
+
+    while len(indexes) - 1 != n_minibatches:
+        num = rm.randint(0, len(trainiter) - 2)  # Skip last minibatch
+        if num not in indexes:
+            indexes.append(num)
+
+    indexes = sorted(indexes)
+
+    for i in range(1, n_minibatches + 1):
+        for j in range(indexes[i] - indexes[i - 1] - 1):
+            trainiter.next()
+
+        images, labels = trainiter.next()
+        length += len(images)
+
+        outputs = model(Variable(images.cuda()))
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+
+        correct += (predicted == labels.cuda()).sum().item()
+        test_loss += float(F.cross_entropy(outputs, Variable(labels.cuda())).item())
+        del images, labels, outputs
+
+    return test_loss / total, correct / total
+
+
+def restart(model, optimizer):
+    print('prova')
+        # if args.patience > 0 and epoch_counter >= args.patience and val_loss[epoch] - val_loss[epoch - args.patience] > 0:
+        #     epoch_counter = 0
+        #     minimum = 1
+        #
+        #     del model
+        #     del optimizer
+        #
+        #     model = load_net(net=args.net, dataset_name=args.dataset)
+        #     if args.gpu:
+        #         model = model.cuda()
+        #
+        #     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, nesterov=False)
 
 
 # Method to train the network following the CLR policy. See also "def cyclical_lr(...)"
@@ -293,7 +422,7 @@ def alt_train(trainloader, model, criterion, optimizer, gamma, plot, epoch):
 
 
 # Adaptive Nesterov training method
-def nest_train(trainloader, model, criterion, optimizer, gamma, plot, epoch):
+def nest_train(trainloader, model, criterion, optimizer, plot):
     model.train()
     v_t = []
     m = 0.1

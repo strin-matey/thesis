@@ -3,14 +3,22 @@ import os
 import time
 import datetime
 import paramiko
-#import getpass
 
 # All the options for the job
 datasets = ['cifar10']
-epochs = 30
-
+epochs = [150]
+nets = ['vgg16']
+batch_sizes = [512]
+adaptive_nesterov = [False]
+patiences = [0]
+learning_rates = [0.1]
+optimizers = [#'momentum', 'nesterov', 'adagrad','
+                'adamax', 'rmsprop', 'adam']
 server = "login.dei.unipd.it"
 username = "stringherm"
+
+# Files to be uploaded
+files = ['__main__.py', 'src/utils.py', 'src/vgg.py', 'src/resnet.py', 'src/alexnet.py']
 
 # Creating a new ssh instance
 ssh = paramiko.SSHClient()
@@ -34,30 +42,43 @@ timestamp = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d_%H:
 current_folder = "out/" + "run__" + timestamp + "/"
 sftp.mkdir(remote_path + current_folder)
 
-# Files to be uploaded
-files = ['__main__.py', 'src/utils.py', 'src/vgg.py', 'src/resnet.py', 'src/alexnet.py']
-
-print(remote_path + current_folder + 'commands.job')
-
 # Create the commands.job file
 with sftp.open(remote_path + current_folder + 'commands.job', 'w') as fp:
+    fp.write("#!/bin/bash \n")
+    fp.write("source /nfsd/opt/anaconda3/anaconda3.sh\n"
+             "conda activate /nfsd/opt/anaconda3/tensorflow\n")
+
     for d in datasets:
-        fp.write("#!/bin/bash \n")
-        fp.write("source /nfsd/opt/anaconda3/anaconda3.sh\n"
-                 "conda activate /nfsd/opt/anaconda3/tensorflow\n")
+        for net in nets:
+            for batch_size in batch_sizes:
+                for epoch in epochs:
+                    for alt in adaptive_nesterov:
+                        for patience in patiences:
+                            for lr in learning_rates:
+                                for opt in optimizers:
+                                    # Formatting/constructing the instruction to be given:
+                                    instruction = "time python3 -u " + remote_path + "__main__.py --cluster --gpu"
 
-        # Formatting/constructing the instruction to be given:
-        instruction = "time python3 -u " + remote_path + "__main__.py --cluster"
+                                    # Options to be added:
+                                    instruction += " --dataset " + str(d)
 
-        # Options to be added:
-        instruction += " --dataset " + str(d)
+                                    instruction += " --outfolder " + current_folder
 
-        instruction += " --outfolder " + current_folder
+                                    instruction += " --epochs " + str(epoch)
 
-        instruction += " --epochs " + str(epochs)
+                                    instruction += " --batch-size " + str(batch_size)
 
-        instruction += " --net vgg11"
-        fp.write(instruction + '\n')
+                                    instruction += " --net " + net
+
+                                    instruction += " --lr " + str(lr) + " --momentum 0.9"
+
+                                    instruction += " --patience " + str(patience)
+
+                                    instruction += " --alt " if alt else ''
+
+                                    instruction += " --optimizer " + opt
+
+                                    fp.write(instruction + '\n')
 
 print("Copying files")
 for file in files:
