@@ -39,6 +39,7 @@ class AlexNetReduced(nn.Module):
         x = self.classifier(x)
         return x
 
+
 class AlexNet(nn.Module):
 
     def __init__(self, num_classes=1000):
@@ -73,6 +74,7 @@ class AlexNet(nn.Module):
         x = x.view(x.size(0), 256 * 6 * 6)
         x = self.classifier(x)
         return x
+
 
 def alexnet(num_classes, pretrained=False, **kwargs):
     r"""AlexNet model architecture from the
