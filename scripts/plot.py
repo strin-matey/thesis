@@ -1,46 +1,73 @@
-import numpy as np
-import os
-import matplotlib
+# Plot libraries and tables
 import matplotlib.pyplot as plt
+import glob
+import numpy as np
 
-filename = 'Resnet34/results_dataaum_cifar10_resnet34_512_300_lr0.1_patience0'
-filename2 = 'Resnet34/results_dataaum_cifar10_resnet34_512_300_lr0.1_patience15'
+results = {}
+for filename in glob.glob('../results/SSA/fashion-mnist/vgg16/epsilon_costante/*.npz'):
+    filename_filtered = ''.join(filename.split("/")[-1].split(".")[0:-1])
+    print(filename_filtered)
+    results.update({filename_filtered: np.load(filename)})
 
-with np.load(f'{filename}.npz') as fl:
-    with np.load(f'{filename2}.npz') as fl2:
-        fig, ax = plt.subplots()
+fig, ax = plt.subplots()
 
-        #res = []
-        #for epoch in range(5, 300):
-        #    if fl['validation_loss'][epoch] - fl['validation_loss'][epoch - 15] > 0:
-        #        res.append(True)
-            #else:
-            #    res.append(False)
+for name, result in results.items():
+    drop_eps = result['drop_eps'][()]
 
-        #print(len(res))
-        var = fl['train_loss']
-        print("Minimum standard ", np.min(var))
-        #print("Maximum standard ", np.max(var), " at epoch: ", np.argwhere(var == np.max(var)))
-        #max_standard = np.min(var)
-        #print(max_standard)
+    n_epochs = len(result['train_loss'])
+    plt.ylim([0, np.max(result['train_loss'])])
+    plt.title('Loss comparison')
+    plt.xlabel('Epochs')
+    ax.plot(np.arange(0, n_epochs), result['train_loss'], '--', label=name+' train')
+    ax.plot(np.arange(0, n_epochs), result['validation_loss'], '--', label=name+' validation')
 
-        var2 = fl2['train_loss']
-        #var2 = var2[199:299]
-        #max_cyclic = np.argwhere(var2 == np.min(var2))
-        print("Minimum cyclic: ", np.min(var2), " at epoch: ", np.argwhere(var2 == np.min(var2)))
-        #print("Maximum cyclic: ", np.max(var2))
+    for drop in drop_eps.keys():
+        plt.axvline(x=drop - 1, color='red')
 
-        #print(max_cyclic)
-        ax.plot(np.arange(0, len(var)), var, '--', label='Standard')
-        ax.plot(np.arange(0, len(var2)), var2, '--', label='Cyclic')
+ax.legend()
+plt.show()
 
-        ax.set(xlabel='Epoch', ylabel='Loss',
-               title='Resnet34 on CIFAR 10 (training loss)')
+fig, ax = plt.subplots()
 
-        ax.legend()
+for name, result in results.items():
+    drop_eps = result['drop_eps'][()]
 
-        plt.show()
+    n_epochs = len(result['train_accuracy'])
+    plt.title('Accuracy comparison')
+    plt.xlabel('Epochs')
+    ax.plot(np.arange(0, n_epochs), result['train_accuracy'], '--', label=name+' train')
+    ax.plot(np.arange(0, n_epochs), result['validation_accuracy'], '--', label=name+' validation')
 
-        fig.savefig(f'{filename}_training_loss.pdf')
+    for drop in drop_eps.keys():
+        plt.axvline(x=drop - 1, color='red')
 
+ax.legend()
+plt.show()
 
+fig, ax = plt.subplots()
+
+for name, result in results.items():
+    probabilities = result['probabilities'][()]
+    x, y = zip(*((k, float(x)) for k in probabilities for x in probabilities[k]))
+    n_epochs = len(result['train_accuracy'])
+    plt.title('Number of accepted moves')
+    ax.scatter(x, y, label=name)
+
+ax.legend()
+plt.show()
+
+fig, ax = plt.subplots()
+
+for name, result in results.items():
+    na = result['na']
+    ac = result['ac']
+
+    ax.scatter(np.arange(0, len(na)) - 0.1, na, label='Worse moves not accepted', alpha=0.2)
+    ax.scatter(np.arange(0, len(ac)), ac, label='Worse moves accepted', alpha=0.2)
+    ax.scatter(np.arange(0, len(na)) + 0.1, np.asarray(na) + np.asarray(ac), label='Worse moves', alpha=0.2)
+
+    for drop in drop_eps.keys():
+        plt.axvline(x=drop - 1, color='red')
+
+ax.legend()
+plt.show()
