@@ -1,75 +1,101 @@
-import torch.nn as nn
-import torch.optim as optim
 import time
-import random as rm
-# import matplotlib.pyplot as plt
 import numpy as np
 from src.utils import *
 
 args = parse_arguments()
 
-set_seed(args.seed)
+#set_seed(args.seed)
 
-# Load train and test datasets
-trainloader, testloader = load_dataset(dataset_name=args.dataset, minibatch=args.batch_size,
-                                       numworkers=args.numworkers, cluster=args.cluster)
+# Load train and test data sets
+train_loader, test_loader = load_dataset(dataset_name=args.dataset, minibatch=args.batch_size,
+                                         num_workers=args.numworkers, cluster=args.cluster)
 
-# Load network
 model = load_net(net=args.net, dataset_name=args.dataset)
 if args.gpu:
     model = model.cuda()
 
-# Preprocessing functional to a specific method
-# Three possible training methods: Minibatch Persistency, Adaptive Nesterov and CLR
-# The cycle_length of the CLR method is entered manually. In the paper are given proper bounds (2-10 times the number of iterations)
-criterion = nn.CrossEntropyLoss()
-optimizer = choose_optimizer(args.optimizer, model, args)
-
-val_loss, val_acc, train_loss, train_acc, train_loss_sample, train_acc_sample, times = [['Nothing' for i in range(args.epochs)] for j in range(7)]
-
-#train_loss_sample, train_acc_sample = [[['Nothing' for i in range(args.epochs)] for k in range(10)] for j in range(2)]
-
-plot = []
-
-percentage = 20
-
-epoch_counter = 0
-
+val_loss, val_acc, train_loss, train_acc, times = [['Nothing' for i in range(args.epochs)] for j in range(5)]
+probabilities, na, ac, drop_eps, bm = {}, [], [], {}, []
 start = time.clock()
 
-for epoch in range(args.epochs):
-    print("Epoch: ", epoch)
+epsilon = args.epsilon
 
-    train(trainloader, model, optimizer, criterion, 1, gpu=args.gpu)
+if args.ssa:
+    for name, param in model.named_parameters():
+        print(name, param.size())
+    print(count_parameters(model))
 
-    val_loss[epoch], val_acc[epoch] = test(testloader, model)
+    temperature = args.temperature
+    cooling_factor = args.cooling_factor
+    accepted_ratio, accepted, not_accepted = None, None, None
 
-    train_loss[epoch], train_acc[epoch] = test_train(trainloader, model)
+    print("Bound:", args.accepted_bound)
+    for epoch in range(args.epochs):
+        print("Epoch: ", epoch, ", epsilon: ", epsilon, ", temperature:", temperature)
 
-    #train_loss_sample[epoch], train_acc_sample[epoch] = test_train_sample(trainloader, model, n_minibatches=10)
+        not_accepted, accepted, probs = stochastic_simulated_annealing(train_loader, model, epsilon, temperature)
 
-    '''for i in range(10):
-        print("Stimato su n = ", i + 1)
+        probabilities[epoch] = probs
+        na.append(not_accepted)
+        ac.append(accepted)
+        bm.append((len(train_loader)-(accepted+not_accepted)) / len(train_loader))
+        times[epoch] = time.clock() - start
 
-       
-        print("True value: ", train_loss[epoch], ", estimated value: ", train_loss_sample[i][epoch])
-        print("True value acc: ", train_acc[epoch], ", estimated value acc: ", train_acc_sample[i][epoch])
-    '''
+        # Training information
+        print(f"Better moves: {len(train_loader)-(accepted+not_accepted)}/{len(train_loader)},"
+              f" Accepted: {accepted}, Not accepted: {not_accepted}")
+        # Evaluation on training set
+        train_loss[epoch], train_acc[epoch] = test_train_sample(train_loader, model)
+        print("Training loss: ", train_loss[epoch])
+        print("Training accuracy:", train_acc[epoch])
 
-    times[epoch] = time.clock() - start
+        # Evaluation on validation set
+        val_loss[epoch], val_acc[epoch] = test(test_loader, model)
+        print("Validation loss: ", val_loss[epoch])
+        print("Validation accuracy: ", val_acc[epoch])
 
+        temperature *= cooling_factor
+        temperature = max(1e-10, temperature)
+        accepted_ratio = 1 - (not_accepted + accepted) / len(train_loader)
+        print(f"Accepted ratio:{accepted_ratio}")
+        if accepted_ratio < args.accepted_bound:
+            drop_eps[epoch] = True
+            epsilon /= 10
+else:
+    criterion = nn.CrossEntropyLoss()
+    optimizer = choose_optimizer(model, args)
 
-del model
+    for epoch in range(args.epochs):
+        print("Epoch: ", epoch)
 
-np.savez(f'results_dataaum_{args.optimizer}_{args.dataset}_{args.net}_{args.batch_size}_{args.epochs}_lr{args.lr}_patience{args.patience}',
+        train(train_loader, model, optimizer, criterion, gpu=args.gpu)
+
+        val_loss[epoch], val_acc[epoch] = test(test_loader, model)
+        train_loss[epoch], train_acc[epoch] = test_train_sample(train_loader, model)
+
+        print("Training loss: ", train_loss[epoch])
+        print("Training accuracy:", train_acc[epoch])
+        print("Validation loss: ", val_loss[epoch])
+        print("Validation accuracy: ", val_acc[epoch])
+
+        times[epoch] = time.clock() - start
+
+#save_model(model, epoch, 'model.pt')
+
+np.savez(f'results_dataaum_{args.optimizer}_{args.dataset}_{args.net}_{args.batch_size}_{args.epochs}_lr{args.lr}_bound{args.accepted_bound}_eps{args.epsilon}',
          times=times,
          validation_accuracy=val_acc,
          validation_loss=val_loss,
          train_accuracy=train_acc,
          train_loss=train_loss,
-         train_accuracy_sample=train_acc_sample,
-         train_loss_sample=train_loss_sample,
-         plot=plot,
          epochs=np.array([args.epochs]),  # TODO inserire job-ID
          lr=np.array([args.lr]),
-         momentum=np.array([args.momentum]))
+         momentum=np.array([args.momentum]),
+         probabilities=probabilities,
+         na=na,
+         ac=ac,
+         better_moves=bm,
+         drop_eps=drop_eps,
+         epsilon=args.epsilon)
+
+del model
