@@ -2,36 +2,41 @@ import torchvision
 import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
+import torch
 import argparse
 import random as rm
 import math
+import sys
+import time
+import numpy as np
 
 from src.resnet import *
 from src.alexnet import *
 from src.vgg import *
 from src.BasicNet import *
 from src.ConvNet import *
+from src.squeezenet import *
+from src.mobilenet import *
 
 
 def parse_arguments():
+
     # Parse the imput parameters
-    parser = argparse.ArgumentParser(description='Cifar testing')
-    parser.add_argument('--batch-size', type=int, default=256, metavar='N',
-                        help='input batch size for training (default: 256)')
-    parser.add_argument('--update-number', type=int, default=1, metavar='N',
-                        help='number of gradient update per minibatch (default: 1)')
+    parser = argparse.ArgumentParser(description='CIFAR testing')
+    parser.add_argument('--batch-size', type=int, default=512, metavar='N',
+                        help='Input batch size for training (default: 512)')
     parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
-    parser.add_argument('--epsilon', type=float, default=10e-4, metavar='E',
-                        help='SGA epsilon')
-    parser.add_argument('--accepted_bound', type=float, default=0.5, metavar='R',
+    parser.add_argument('--epsilon', type=float, default=1e-3, metavar='E',
+                        help='SSA epsilon')
+    parser.add_argument('--restart_epsilon', type=float, default=1e-6, metavar='E',
+                        help='Restart epsilon')
+    parser.add_argument('--accepted_bound', type=float, default=0.6, metavar='R',
                         help='Bound accepted ratio')
-    parser.add_argument('--patience', type=int, default=0, metavar='P',
-                        help='Early-stopping restart')
     parser.add_argument('--temperature', type=float, default=1, metavar='T',
                         help='Temperature')
     parser.add_argument('--cooling_factor', type=float, default=0.97, metavar='C',
@@ -40,27 +45,28 @@ def parse_arguments():
                         help='random seed (default: 1)')
     parser.add_argument('--numworkers', type=int, default=1, metavar='S',
                         help='numworkers for the loading class (default: 1)')
+    parser.add_argument('--gpu_number', type=int, default=0, metavar='GN',
+                        help='Select the GPU on the cluster')
     parser.add_argument('--net', dest="net", action="store", default="vgg16",
                         help='network architecture to be used')
+    parser.add_argument('--train_mode', dest="train_mode", action="store", default="sgd",
+                        help='Train mode')
     parser.add_argument('--dataset', dest="dataset", action="store", default="cifar10",
                         help='dataset on which to train the network')
-    parser.add_argument('--log-interval', type=int, default=10, metavar='N',
-                        help='how many batches to wait before logging training status')
     parser.add_argument('--outfolder', type=str,
                         help='Out folder for results')
     parser.add_argument('--optimizer', type=str,
                         help='Optimizer to use')
-    parser.add_argument('--clr', dest='clr', action='store_true')
-    parser.add_argument('--no-clr', dest='clr', action='store_false')
-    parser.set_defaults(clr=False)
-    parser.add_argument('--alt-train', dest='alt', action='store_true')
-    parser.add_argument('--no-alt-train', dest='alt', action='store_false')
-    parser.set_defaults(alt=False)
+    parser.add_argument('--lr_set', type=str, help='LR set to use in SGD-SA')
+    parser.add_argument('--dataum', dest='dataaum', action='store_true', default=False)
     parser.add_argument('--cluster', action='store_true', default=False)
     parser.add_argument('--gpu', action='store_true', default=False)
-    parser.add_argument('--ssa', action='store_true', default=False)
 
     return parser.parse_args()
+
+
+def set_device(gpu_number):
+    torch.cuda.set_device(gpu_number)
 
 
 def set_seed(seed):
@@ -104,65 +110,17 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def my_adaptive_nesterov(trainloader, model, optimizer, criterion):
-    v_t = []
-
-    for i, (inputs, labels) in enumerate(trainloader, 0):
-        inputs = inputs
-        labels = labels
-        if i == 0:
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-
-            for k, f in enumerate(model.parameters(), 0):
-                v_t.append(0.1 * f.grad.data.clone())
-        else:
-            for k, f in enumerate(model.parameters()):
-                f.data.sub_(0.1 * v_t[k])
-
-            optimizer.zero_grad()
-
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
-            loss.backward()
-
-            g = torch.tensor([0], dtype=torch.float32)
-
-            for k, f in enumerate(model.parameters(), 0):
-                g = torch.cat((g, f.grad.data.clone().view(-1)), dim=-1)
-
-            print(g.size())
-
-            epsilon = torch.clamp(loss.clone() / torch.clamp(torch.dot(g, g), max=1e10).data, min=0.001, max=0.1)
-
-            print(epsilon.data)
-            print(epsilon.data.size())
-
-            # d = torch.distributions.normal.Normal(torch.Tensor([0.0]), torch.Tensor([torch.std(g)]))
-
-            for k, f in enumerate(model.parameters(), 0):
-                # if i%5 == 0:
-                # f.data.sub_(f.grad.data.add_(d.sample().cuda()) * epsilon.data)
-                # else:
-                f.data.sub_(f.grad.data * epsilon.data)
-                v_t[k] = 0.5 * v_t[k] + f.grad.data * epsilon.data
-
-        del inputs, labels, outputs
-
-
 def train(train_loader, model, optimizer, criterion, gpu=True):
 
     """
+    One training pass over the whole dataset
 
     :param train_loader: The training set loader
     :param model: The model to be optimized
     :param optimizer:
     :param criterion:
     :param gpu:
-    :return:
+    :return: None
 
     """
 
@@ -184,24 +142,32 @@ def train(train_loader, model, optimizer, criterion, gpu=True):
         del inputs, labels, outputs
 
 
-def load_dataset(dataset_name="cifar10", minibatch=512, num_workers=2, cluster=False, drop_last=False):
+def load_dataset(dataset_name="cifar10", minibatch=512, num_workers=2, dataaum=False, cluster=False, drop_last=False):
 
     """
     Load the dataset
     :param dataset_name: Available options cifar10, cifar100, MNIST
     :param minibatch: Minibatch size
     :param num_workers: Number of workers to load the dataset
+    :param dataaum: Boolean for data augmentation
+    :param drop_last: Drop the last minibatch
     :param cluster:
     :return: Train loader and test loader
     """
 
     if dataset_name == "cifar10":
-        transform_train = transforms.Compose([
-            #transforms.RandomCrop(32, padding=4), 	#uncomment for data augmentation
-            #transforms.RandomHorizontalFlip(),      #uncomment for data augmentation
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
-        ])
+        if dataaum:
+            transform_train = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+            ])
+        else:
+            transform_train = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+            ])
         transform_test = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))])
 
@@ -295,6 +261,10 @@ def load_net(net="alexnet", dataset_name="cifar10"):
         return VGG("VGG16", num_classes)
     elif net == "vgg19":
         return VGG("VGG19", num_classes)
+    elif net == "squeezenet":
+        return squeezenet1_0(num_classes=num_classes)
+    elif net == "mobilenet":
+        return MobileNetV2()
 
 
 def test(test_loader, model):
@@ -359,6 +329,7 @@ def test_minibatch(images, labels, model):
     :return:
     """
     model.eval()
+
     correct = 0
     total = labels.size(0)
     test_loss = 0
@@ -367,6 +338,8 @@ def test_minibatch(images, labels, model):
     _, predicted = torch.max(outputs.data, 1)
     correct += (predicted == labels).sum().item()
     test_loss += float(F.cross_entropy(outputs, labels).item())
+
+    model.train()
 
     return test_loss / total, correct / total
 
@@ -422,7 +395,7 @@ def save_model(model, epoch, path):
     }, path)
 
 
-def restart(trainloader, model, args, optimizer, epsilon=0.0002):
+def restart(trainloader, model, args, optimizer):
     # if args.patience > 0 and epoch_counter >= args.patience and val_loss[epoch] - val_loss[epoch - args.patience] > 0:
     #     epoch_counter = 0
     #     minimum = 1
@@ -438,7 +411,7 @@ def restart(trainloader, model, args, optimizer, epsilon=0.0002):
 
     train_cost, train_accuracy = test_train_sample(trainloader, model, n_minibatches=10)
 
-    if train_cost < epsilon:
+    if train_cost < args.restart_epsilon:
         print("Restart")
 
         del model
@@ -466,7 +439,7 @@ def stochastic_simulated_annealing(train_loader, model, epsilon, T, gpu=True):
             inputs, labels = inputs.cuda(), labels.cuda()
 
         initial_loss = test_minibatch(inputs, labels, model)[0]
-        print(f"Initial loss: {initial_loss}")
+        #print(f"Initial loss: {initial_loss}")
         # List used to keep the move to get back to the initial point
         inverse = []
 
@@ -486,13 +459,13 @@ def stochastic_simulated_annealing(train_loader, model, epsilon, T, gpu=True):
             param.data.add_(move)
         # Evaluate the loss
         first_loss = test_minibatch(inputs, labels, model)[0]
-        print(f"First loss: {first_loss}")
+        #print(f"First loss: {first_loss}")
         # Second move
         for k, param in enumerate(model.parameters()):
             param.data.add_(inverse[k].mul(2))
             inverse[k].mul_(-1)
         second_loss = test_minibatch(inputs, labels, model)[0]
-        print(f"Second loss: {second_loss}")
+        #print(f"Second loss: {second_loss}")
         # Get back if the first move is better
         if first_loss < second_loss:
             for k, param in enumerate(model.parameters()):
@@ -513,8 +486,77 @@ def stochastic_simulated_annealing(train_loader, model, epsilon, T, gpu=True):
             new_loss = initial_loss
         elif new_loss > initial_loss:
             accepted += 1
-        print(f"New loss: {new_loss}")
-        print(f"Real final loss: {test_minibatch(inputs, labels, model)[0]}")
+        #print(f"New loss: {new_loss}")
+        #print(f"Real final loss: {test_minibatch(inputs, labels, model)[0]}")
+
+        del move, inverse, inputs, labels
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return not_accepted, accepted, probabilities
+
+
+def stochastic_simulated_annealing_acc(train_loader, model, epsilon, T, gpu=True):
+    model.train()
+
+    not_accepted, accepted = 0, 0
+    probabilities = []
+
+    for i, data in enumerate(train_loader, 0):
+
+        inputs, labels = data
+        if gpu:
+            inputs, labels = inputs.cuda(), labels.cuda()
+
+        initial_acc = test_minibatch(inputs, labels, model)[1]
+        #print(f"Initial loss: {initial_acc}")
+        # List used to keep the move to get back to the initial point
+        inverse = []
+
+        # First move
+        for param in model.parameters():
+            # Replicate the tensor
+            tensor_size = param.data.size()
+            move = torch.zeros(tensor_size)
+            # Send it to the GPU
+            if gpu:
+                move = move.cuda()
+            # Generate move
+            move = move.normal_(std=epsilon)
+            # Step back is saved
+            inverse.append(move.mul(-1))
+            # Move the parameters
+            param.data.add_(move)
+        # Evaluate the loss
+        first_acc = test_minibatch(inputs, labels, model)[1]
+        #print(f"First loss: {first_acc}")
+        # Second move
+        for k, param in enumerate(model.parameters()):
+            param.data.add_(inverse[k].mul(2))
+            inverse[k].mul_(-1)
+        second_acc = test_minibatch(inputs, labels, model)[1]
+        #print(f"Second loss: {second_acc}")
+        # Get back if the first move is better
+        if first_acc > second_acc:
+            for k, param in enumerate(model.parameters()):
+                param.data.add_(inverse[k].mul(2))
+                inverse[k].mul_(-1)
+            new_acc = first_acc
+        else:
+            new_acc = second_acc
+
+        if new_acc < initial_acc:
+            probabilities.append(math.exp((new_acc - initial_acc) / T))
+
+        # Reject worse solution according to the standard formula
+        if new_acc < initial_acc and math.exp((new_acc - initial_acc) / T) < rm.random():
+            not_accepted += 1
+            for k, param in enumerate(model.parameters()):
+                param.data.add_(inverse[k])
+            new_acc = initial_acc
+        elif new_acc < initial_acc:
+            accepted += 1
+        #print(f"New loss: {new_acc}")
+        #print(f"Real final loss: {test_minibatch(inputs, labels, model)[1]}")
 
         del move, inverse, inputs, labels
 
@@ -569,6 +611,225 @@ def simulated_annealing(trainloader, model, initial_accuracy, epsilon, temperatu
         new_accuracy = initial_accuracy
 
     del move, inverse
+
     # print("Final accuracy:", new_accuracy)
     return new_accuracy
+
+
+def train_ssa(train_loader, test_loader, model, args):
+    val_loss, val_acc, train_loss, train_acc, times = [['Nothing' for i in range(args.epochs)] for j in range(5)]
+    probabilities, na, ac, drop_eps, bm = {}, [], [], {}, []
+    start = time.clock()
+
+    epsilon = args.epsilon
+
+    for name, param in model.named_parameters():
+        print(name, param.size())
+    print(count_parameters(model))
+
+    temperature = args.temperature
+    cooling_factor = args.cooling_factor
+
+    print("Bound:", args.accepted_bound)
+    for epoch in range(args.epochs):
+        print("Epoch: ", epoch, ", epsilon: ", epsilon, ", temperature:", temperature)
+
+        not_accepted, accepted, probs = stochastic_simulated_annealing(train_loader, model, epsilon, temperature)
+
+        probabilities[epoch] = probs
+        na.append(not_accepted)
+        ac.append(accepted)
+        bm.append((len(train_loader)-(accepted+not_accepted)) / len(train_loader))
+        times[epoch] = time.clock() - start
+
+        # Training information
+        print(f"Better moves: {len(train_loader)-(accepted+not_accepted)}/{len(train_loader)},"
+              f" Accepted: {accepted}, Not accepted: {not_accepted}")
+        # Evaluation on training set
+        train_loss[epoch], train_acc[epoch] = test_train_sample(train_loader, model)
+        print("Training loss: ", train_loss[epoch])
+        print("Training accuracy:", train_acc[epoch])
+
+        # Evaluation on validation set
+        val_loss[epoch], val_acc[epoch] = test(test_loader, model)
+        print("Validation loss: ", val_loss[epoch])
+        print("Validation accuracy: ", val_acc[epoch])
+
+        temperature *= cooling_factor
+        temperature = max(1e-10, temperature)
+        accepted_ratio = 1 - (not_accepted + accepted) / len(train_loader)
+        print(f"Accepted ratio:{accepted_ratio}")
+        if accepted_ratio < args.accepted_bound:
+            drop_eps[epoch] = True
+            epsilon /= 10
+
+    np.savez(f'results_{args.train_mode}_dataaum{args.dataaum}_{args.optimizer}_{args.dataset}_{args.net}'
+             f'_{args.batch_size}_{args.epochs}_lr{args.lr}_bound{args.accepted_bound}_eps{args.restart_epsilon}',
+             times=times,
+             validation_accuracy=val_acc,
+             validation_loss=val_loss,
+             train_accuracy=train_acc,
+             train_loss=train_loss,
+             epochs=np.array([args.epochs]),
+             lr=np.array([args.lr]),
+             momentum=np.array([args.momentum]),
+             probabilities=probabilities,
+             na=na,
+             ac=ac,
+             better_moves=bm,
+             drop_eps=drop_eps,
+             epsilon=args.epsilon)
+
+
+def train_sgd(train_loader, test_loader, model, args):
+    print("SGD classico")
+    val_loss, val_acc, train_loss, train_acc, times = [['Nothing' for i in range(args.epochs)] for j in range(5)]
+    start = time.clock()
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = choose_optimizer(model, args)
+
+    for epoch in range(args.epochs):
+        print("Epoch: ", epoch)
+
+        if args.train_mode == 'scheduled_sgd' and (epoch == 2 or epoch == 70):
+            for g in optimizer.param_groups:
+                g['lr'] /= 10
+            for g in optimizer.param_groups:
+                print(f"LR: {g['lr']}")
+        print(optimizer.state_dict())
+
+        train(train_loader, model, optimizer, criterion, gpu=args.gpu)
+        val_loss[epoch], val_acc[epoch] = test(test_loader, model)
+        train_loss[epoch], train_acc[epoch] = test_train_sample(train_loader, model)
+
+        model, optimizer, train_cost, train_accuracy = restart(train_loader, model, args, optimizer)
+
+        print("Training loss: ", train_loss[epoch])
+        print("Training accuracy:", train_acc[epoch])
+        print("Validation loss: ", val_loss[epoch])
+        print("Validation accuracy: ", val_acc[epoch])
+
+        times[epoch] = time.clock() - start
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+    np.savez(f'results_{args.train_mode}_dataaum{args.dataaum}_{args.optimizer}_{args.dataset}_{args.net}'
+             f'_{args.batch_size}_{args.epochs}_lr{args.lr}_bound{args.accepted_bound}_eps-restart{args.restart_epsilon}',
+             times=times,
+             validation_accuracy=val_acc,
+             validation_loss=val_loss,
+             train_accuracy=train_acc,
+             train_loss=train_loss,
+             epochs=np.array([args.epochs]),
+             lr=np.array([args.lr]),
+             momentum=np.array([args.momentum]),
+             epsilon=args.restart_epsilon)
+
+    del model
+
+
+def SGD_SA(train_loader, model, optimizer, criterion, args, T):
+    not_accepted, accepted = 0, 0
+    probabilities = []
+
+    for i, data in enumerate(train_loader, 0):
+
+        if args.lr_set == "set1":
+            lr = rm.choice([0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2,
+                            0.1, 0.09, 0.08, 0.07, 0.06, 0.05])
+        else:
+            lr = rm.choice([0.5, 0.4, 0.3, 0.2,
+                            0.1, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01])
+
+        inputs, labels = data
+        inputs, labels = inputs.cuda(), labels.cuda()
+
+        initial_loss = test_minibatch(inputs, labels, model)[0]
+        print(f"lr = {lr}")
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            param.data.sub_(param.grad.data.mul(lr))
+
+        new_loss = test_minibatch(inputs, labels, model)[0]
+
+        if new_loss > initial_loss:
+            probabilities.append(math.exp(- (new_loss - initial_loss) / T))
+
+        if new_loss > initial_loss and math.exp(- (new_loss - initial_loss) / T) < rm.random():
+            #print("newloss>initial_loss")
+            not_accepted += 1
+            for k, f in enumerate(model.parameters(), 0):
+                f.data.add_(f.grad.data.mul(lr))
+        elif new_loss > initial_loss:
+            accepted += 1
+
+        del inputs, labels, outputs
+
+    return not_accepted, accepted, probabilities
+
+
+def train_SGD_SA(train_loader, test_loader, model, args):
+    val_loss, val_acc, train_loss, train_acc, times = [['Nothing' for i in range(args.epochs)] for j in range(5)]
+    probabilities, na, ac, drop_eps, bm = {}, [], [], {}, []
+    start = time.clock()
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = choose_optimizer(model, args)
+
+    temperature = args.temperature
+    cooling_factor = args.cooling_factor
+
+    for epoch in range(args.epochs):
+        print("Epoch: ", epoch, ", temperature:", temperature)
+
+        not_accepted, accepted, probs = SGD_SA(train_loader, model, optimizer, criterion, args, temperature)
+        #not_accepted, accepted, probs = 0, 0, []
+        #train(train_loader, model, optimizer, criterion, gpu=args.gpu)
+
+        probabilities[epoch] = probs
+        na.append(not_accepted)
+        ac.append(accepted)
+        bm.append((len(train_loader)-(accepted+not_accepted)) / len(train_loader))
+        times[epoch] = time.clock() - start
+
+        # Training information
+        print(f"Better moves: {len(train_loader)-(accepted+not_accepted)}/{len(train_loader)},"
+              f" Accepted: {accepted}, Not accepted: {not_accepted}")
+
+        # Evaluation on training set
+        train_loss[epoch], train_acc[epoch] = test_train_sample(train_loader, model)
+        print("Training loss: ", train_loss[epoch])
+        print("Training accuracy:", train_acc[epoch])
+
+        # Evaluation on validation set
+        val_loss[epoch], val_acc[epoch] = test(test_loader, model)
+        print("Validation loss: ", val_loss[epoch])
+        print("Validation accuracy: ", val_acc[epoch])
+
+        temperature *= cooling_factor
+        temperature = max(1e-10, temperature)
+
+    np.savez(f'results_{args.train_mode}__set{args.lr_set}_dataaum{args.dataaum}_{args.optimizer}_{args.dataset}_{args.net}'
+             f'_{args.batch_size}_{args.epochs}_lr{args.lr}_bound{args.accepted_bound}_eps{args.restart_epsilon}',
+             times=times,
+             validation_accuracy=val_acc,
+             validation_loss=val_loss,
+             train_accuracy=train_acc,
+             train_loss=train_loss,
+             epochs=np.array([args.epochs]),
+             lr=np.array([args.lr]),
+             momentum=np.array([args.momentum]),
+             probabilities=probabilities,
+             na=na,
+             ac=ac,
+             better_moves=bm,
+             drop_eps=drop_eps,
+             epsilon=args.epsilon)
 
