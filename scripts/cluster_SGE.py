@@ -6,19 +6,19 @@ import paramiko
 
 # All the options for the job
 datasets = ['cifar10']
-epochs = [150]
-nets = ['vgg16']
+epochs = [300]
+nets = ['vgg16', 'alexnet', 'resnet34']
 batch_sizes = [512]
-adaptive_nesterov = [False]
-patiences = [0]
-learning_rates = [0.1]
-optimizers = [#'momentum', 'nesterov', 'adagrad','
-                'adamax', 'rmsprop', 'adam']
+epsilon = ['1e-3']
+bounds = [0.7]
+#bounds = [0]
 server = "login.dei.unipd.it"
 username = "stringherm"
+lr = 0.001
+optimizer = 'momentum'
 
 # Files to be uploaded
-files = ['__main__.py', 'src/utils.py', 'src/vgg.py', 'src/resnet.py', 'src/alexnet.py']
+files = ['__main__.py', 'src/utils.py', 'src/vgg.py', 'src/resnet.py', 'src/alexnet.py', 'src/BasicNet.py', 'src/ConvNet.py']
 
 # Creating a new ssh instance
 ssh = paramiko.SSHClient()
@@ -52,33 +52,33 @@ with sftp.open(remote_path + current_folder + 'commands.job', 'w') as fp:
         for net in nets:
             for batch_size in batch_sizes:
                 for epoch in epochs:
-                    for alt in adaptive_nesterov:
-                        for patience in patiences:
-                            for lr in learning_rates:
-                                for opt in optimizers:
-                                    # Formatting/constructing the instruction to be given:
-                                    instruction = "time python3 -u " + remote_path + "__main__.py --cluster --gpu"
+                    for eps in epsilon:
+                        for bound in bounds:
+                            # Formatting/constructing the instruction to be given:
+                            instruction = "time python3 -u " + remote_path + "__main__.py --cluster --gpu"
 
-                                    # Options to be added:
-                                    instruction += " --dataset " + str(d)
+                            # Options to be added:
+                            instruction += " --dataset " + str(d)
 
-                                    instruction += " --outfolder " + current_folder
+                            instruction += " --outfolder " + current_folder
 
-                                    instruction += " --epochs " + str(epoch)
+                            instruction += " --epochs " + str(epoch)
 
-                                    instruction += " --batch-size " + str(batch_size)
+                            instruction += " --batch-size " + str(batch_size)
 
-                                    instruction += " --net " + net
+                            instruction += " --net " + net
 
-                                    instruction += " --lr " + str(lr) + " --momentum 0.9"
+                            instruction += " --ssa --epsilon " + eps + " --accepted_bound " + str(bound) + " --cooling_factor 0.99 "
 
-                                    instruction += " --patience " + str(patience)
+                            instruction += " --lr " + str(lr) + " --momentum 0.9"
 
-                                    instruction += " --alt " if alt else ''
+                            #instruction += " --patience " + str(patience)
 
-                                    instruction += " --optimizer " + opt
+                            #instruction += " --alt " if alt else ''
 
-                                    fp.write(instruction + '\n')
+                            instruction += " --optimizer " + optimizer
+
+                            fp.write(instruction + '\n')
 
 print("Copying files")
 for file in files:
