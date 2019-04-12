@@ -2,7 +2,7 @@ import torch.nn as nn
 
 
 cfg = {
-    'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512],
+    'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG13': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG16': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512],
     'VGG19': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
@@ -23,7 +23,6 @@ class VGG(nn.Module):
 
     def forward(self, x):
         out = self.features(x)
-        #print(out.size())
         out = out.view(out.size(0), -1)  # Reshape the tensor
         out = self.classifier(out)
         return out
@@ -36,7 +35,7 @@ class VGG(nn.Module):
                 layers += [nn.MaxPool2d(kernel_size=2)]
             else:
                 layers += [nn.Conv2d(in_channels, x, kernel_size=3, padding=1),
-                           nn.BatchNorm2d(x),
+                           #nn.BatchNorm2d(x),
                            nn.ReLU(inplace=True)]
                 in_channels = x
         layers += [nn.AvgPool2d(kernel_size=1, stride=1)]

@@ -82,9 +82,9 @@ def alexnet(num_classes, pretrained=False, **kwargs):
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    if(num_classes == 10 or num_classes == 100):
+    if (num_classes == 10 or num_classes == 100):
         model = AlexNetReduced(num_classes=num_classes)
-    if(num_classes == 1000):
+    if (num_classes == 1000):
         model = AlexNet(**kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['alexnet']))
