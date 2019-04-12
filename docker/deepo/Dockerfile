@@ -12,3 +12,4 @@ RUN jt -t onedork -fs 95 -altp -tfs 11 -nfs 115 -cellw 88% -T
 RUN pip install seaborn
 
 RUN python -m pip install --user "git+https://github.com/javadba/mpld3@display_fix"
+
